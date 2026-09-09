@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, type ReactNode } from "react";
 import Icon, { type IconName } from "@/components/editorial/Icon";
 import { useTweaks } from "@/components/editorial/TweaksContext";
 import { useRegistry } from "@/components/app/RegistryContext";
@@ -139,6 +139,8 @@ const NAV_SECTIONS: NavSection[] = [
       nav("stage", "trend-up"),
       nav("size", "tally"),
       nav("defect", "spark"),
+      nav("hold", "alert"),
+      nav("open-lots", "history"),
       nav("spc", "trend-down"),
       nav("process-flow", "split"),
       nav("copq", "lightning"),
@@ -149,6 +151,8 @@ const NAV_SECTIONS: NavSection[] = [
     items: [
       nav("reports", "print"),
       nav("capa", "check"),
+      nav("remedies", "spark"),
+      nav("alerts", "alert"),
       // No href: Ask MOID is the side panel, not a route.
       nav("ask", "comment", { aiBadge: true }),
       nav("audit", "search"),
@@ -182,6 +186,8 @@ const SCOPE_CONTROLS: Partial<Record<NavKey, ("view" | "interval" | "range" | "s
   stage: ["view", "interval", "range", "sources"],
   size: ["view", "interval", "range", "sources"],
   defect: ["view", "interval", "range", "sources"],
+  hold: ["view", "interval", "range", "sources"],
+  "open-lots": ["interval", "range", "sources"],
   spc: ["view", "interval", "range", "sources"],
   "process-flow": ["view", "interval", "range", "sources"],
   copq: ["view", "interval", "range", "sources"],
@@ -193,6 +199,7 @@ const SCOPE_CONTROLS: Partial<Record<NavKey, ("view" | "interval" | "range" | "s
 
 export default function AppShell({
   active, trustScore: trustScoreProp, statusCounts, dateRange, children, presetId: _presetId,
+  toolbarExtra, wide,
 }: {
   active: NavKey;
   trustScore?: number | null;
@@ -201,6 +208,10 @@ export default function AppShell({
   children: React.ReactNode;
   /** Which Data Entry preset's registry to load for stage-gate nav. Omit for the default preset. */
   presetId?: string | null;
+  /** Extra controls in the masthead, immediately left of Jump. */
+  toolbarExtra?: ReactNode;
+  /** Dashboard uses the full main pane — no 1400px cap, so side gutters go away. */
+  wide?: boolean;
 }) {
   const router = useRouter();
   const { events, refreshEvents } = useEvents();
@@ -1802,6 +1813,7 @@ export default function AppShell({
 
         {/* right profile / actions: styled cleanly in pillbox cards */}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {toolbarExtra}
           {/* Jump / command palette */}
           <button
             type="button"
@@ -2092,8 +2104,8 @@ export default function AppShell({
       }}>
         <div style={{
           width: "100%",
-          maxWidth: "1400px",
-          margin: "0 auto"
+          maxWidth: wide ? "none" : "1400px",
+          margin: wide ? 0 : "0 auto",
         }}>
         {banner && (
           <div

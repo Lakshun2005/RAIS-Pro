@@ -67,6 +67,8 @@ const METRIC_SYNONYMS: Array<[string, RegExp]> = [
   ["fpy", /\b(fpy|first pass yield|\byield\b)\b/],
   ["size", /\b(size|french|\bfr\b)\b/],
   ["stage", /\b(stage|gate|checkpoint|inspection point)\b/],
+  ["hold", /\b(hold qty|hold quantity|\bhold\b|held|rework qty)\b/],
+  ["open-lots", /\b(open lots?|wip|work in progress|stalled lots?)\b/],
   ["defect", /\b(defect|reject|rejection|nonconformance|non-conformance|\bnc\b|scrap)\b/],
 ];
 
@@ -85,6 +87,8 @@ export const METRIC_SCREEN: Record<string, NavKey> = {
   size: "size",
   stage: "stage",
   rate: "stage",
+  hold: "hold",
+  "open-lots": "open-lots",
 };
 
 export function screenForMetric(metric: string): NavKey | null {

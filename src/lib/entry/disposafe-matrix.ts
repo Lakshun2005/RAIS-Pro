@@ -345,6 +345,11 @@ export type ShiftBatchRecord = {
   reject: number;
   /** Primary Production only — trolley count. */
   trolleys?: number;
+  /**
+   * Production Dipping: one defect map per trolley. `defects` is the sum
+   * across these rows (what the ledger and balance check use).
+   */
+  trolleyDefects?: Record<string, number>[];
   /** Secondary Production only — production/storage bin id. */
   bin?: string;
   defects: Record<string, number>;

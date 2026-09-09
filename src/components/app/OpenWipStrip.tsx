@@ -15,7 +15,14 @@ import type { AuditEventLike } from "@/lib/analytics/audit-sessions";
 
 const NAMED = 3;
 
-export default function OpenWipStrip({ events }: { events: AuditEventLike[] }) {
+export default function OpenWipStrip({
+  events,
+  embedded,
+}: {
+  events: AuditEventLike[];
+  /** Drop the outer top margin when this strip sits inside the dashboard board. */
+  embedded?: boolean;
+}) {
   const wip = React.useMemo(() => openWip(events), [events]);
 
   // Nothing open is genuinely good news on a shop floor, and an empty band
@@ -28,7 +35,7 @@ export default function OpenWipStrip({ events }: { events: AuditEventLike[] }) {
     <section
       aria-label="Work in progress"
       style={{
-        marginTop: "var(--gap-grid)",
+        marginTop: embedded ? 0 : "var(--gap-grid)",
         padding: "12px var(--pad-card)",
         borderRadius: "var(--radius-lg)",
         border: "1px solid var(--border)",
@@ -66,7 +73,7 @@ export default function OpenWipStrip({ events }: { events: AuditEventLike[] }) {
       )}
 
       <a
-        href="/data-entry?status=open"
+        href="/open-lots"
         style={{
           marginLeft: "auto",
           fontSize: "var(--text-xs)",

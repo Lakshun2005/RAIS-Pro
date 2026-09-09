@@ -135,6 +135,22 @@ export function stageSortKey(stageId?: string | null, stageLabel?: string | null
   return byLabel ? STAGE_ORDER.indexOf(byLabel) : 99;
 }
 
+export function stageCategoryOf(stageId?: string | null): StageCategory | undefined {
+  if (!stageId) return undefined;
+  if (STAGE_CATEGORY[stageId]) return STAGE_CATEGORY[stageId];
+  const canon = resolveStageId(stageId);
+  return canon ? STAGE_CATEGORY[canon] : undefined;
+}
+
+export function sortStageIds(ids: readonly string[]): string[] {
+  return [...ids].sort((a, b) => {
+    const ka = stageSortKey(a);
+    const kb = stageSortKey(b);
+    if (ka !== kb) return ka - kb;
+    return a.localeCompare(b);
+  });
+}
+
 /**
  * The gate a section's units ENTER at — the denominator for that section.
  *

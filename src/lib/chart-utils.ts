@@ -22,7 +22,7 @@ export function useContainerWidth(fallbackWidth = 660) {
 
   useEffect(() => {
     if (!ref.current) return;
-    
+
     // Set initial width
     setWidth(ref.current.getBoundingClientRect().width || fallbackWidth);
 

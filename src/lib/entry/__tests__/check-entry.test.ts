@@ -1,5 +1,7 @@
 import { checkEntry, summariseLedger, type EntryDraft } from "../check-entry";
 import { entryIdentity, identityKey, sizeFromLot } from "../identity";
+import { resolveEntrySchema } from "../entry-schema";
+import { occupiedStageIds } from "../process-sequence";
 
 const TODAY = "2026-08-15";
 
@@ -232,6 +234,45 @@ describe("checkEntry — same counts under a different lot code", () => {
     );
     expect(v.warnings.map((w) => w.code)).not.toContain("same-counts-different-lot");
     expect(v.canSave).toBe(true);
+  });
+});
+
+describe("checkEntry — process sequence", () => {
+  const schema = resolveEntrySchema({
+    stages: [
+      { stageId: "production", label: "Dipping", category: "primary", columns: [{ key: "checked" }] },
+      { stageId: "secondary", label: "Secondary", category: "secondary", columns: [{ key: "checked" }] },
+      { stageId: "visual", label: "Visual Inspection", category: "assembly", columns: [{ key: "checked" }] },
+    ],
+    sections: [
+      { id: "primary", label: "Production Dipping" },
+      { id: "secondary", label: "Secondary" },
+      { id: "assembly", label: "Assembly" },
+    ],
+  });
+
+  it("blocks Assembly when Dipping has not been entered", () => {
+    const v = checkEntry(draft(), EMPTY, TODAY, { schema, occupied: new Set() });
+    expect(v.canSave).toBe(false);
+    expect(v.blocks.map((b) => b.code)).toContain("process-incomplete");
+    expect(v.blocks.find((b) => b.code === "process-incomplete")!.message).toMatch(/Dipping/);
+  });
+
+  it("lets Assembly save once Dipping and Secondary are on the lot", () => {
+    const occupied = occupiedStageIds(
+      [
+        { stageId: "production", batchNo: "26H25-18", eventType: "production", quantity: 1000 },
+        { stageId: "secondary", batchNo: "26H25-18", eventType: "production", quantity: 900 },
+      ],
+      "26H25-18",
+    );
+    const v = checkEntry(draft(), EMPTY, TODAY, { schema, occupied });
+    expect(v.blocks.map((b) => b.code)).not.toContain("process-incomplete");
+    expect(v.canSave).toBe(true);
+  });
+
+  it("does not apply the gate when no process context is passed", () => {
+    expect(checkEntry(draft(), EMPTY, TODAY).canSave).toBe(true);
   });
 });
 

@@ -196,6 +196,19 @@ export default function NotificationsPanel() {
               </TabChip>
             </div>
           </div>
+          <a
+            href="/alerts"
+            style={{
+              display: "block",
+              padding: "4px 8px 10px",
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--accent-text)",
+              textDecoration: "none",
+            }}
+          >
+            Open alerts page →
+          </a>
 
           {items.length === 0 && (
             <div style={{ padding: 16, fontSize: 12.5, color: "var(--text-3)", textAlign: "center" }}>

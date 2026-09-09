@@ -28,6 +28,11 @@ import {
   type EntryIdentity,
   type IdentifiableEvent,
 } from "@/lib/entry/identity";
+import {
+  missingProcessStep,
+  type ProcessGap,
+} from "@/lib/entry/process-sequence";
+import type { ResolvedEntrySchema } from "@/lib/entry/entry-schema";
 
 export type EntryProblemSeverity = "block" | "warn" | "note";
 
@@ -133,10 +138,17 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
  * Pure: same inputs, same verdict, no clock and no I/O. `today` is passed in so
  * the future-date rule is testable.
  */
+export interface EntryProcessContext {
+  schema: ResolvedEntrySchema;
+  /** Stage ids this lot already occupies (ledger + unsynced local rows). */
+  occupied: Set<string>;
+}
+
 export function checkEntry(
   draft: EntryDraft,
   ledger: Map<string, LedgerEntrySummary>,
   today: string,
+  process?: EntryProcessContext,
 ): EntryVerdict {
   const blocks: EntryProblem[] = [];
   const warnings: EntryProblem[] = [];
@@ -290,6 +302,28 @@ export function checkEntry(
           ? `${station} already has lot ${lot} on ${list}. This records a new day.`
           : `${station} already has ${otherDays.length} other days on lot ${lot} — ${list}. This records a new day.`,
     });
+  }
+
+  // ── Process order: Dipping → Secondary → Assembly (and substages) ───────
+  //
+  // A lot is born at Dipping. Secondary and Assembly cannot be typed until
+  // the earlier process is on the ledger (or this workstation's shift list).
+  // Revising a row that is already there skips the gate.
+  if (process && !draft.editing) {
+    const gap: ProcessGap | null = missingProcessStep({
+      lot,
+      station: draft.station,
+      schema: process.schema,
+      occupied: process.occupied,
+    });
+    if (gap) {
+      blocks.push({
+        code: gap.code,
+        severity: "block",
+        message: gap.message,
+        action: gap.action,
+      });
+    }
   }
 
   // ── Same numbers under a different lot code ─────────────────────────────

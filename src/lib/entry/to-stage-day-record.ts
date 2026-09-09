@@ -72,7 +72,13 @@ export function toStageDayRecord(rec: ShiftBatchRecord, ingestionId: string): St
         ? { pass: rec.pass, passReason: rec.passReason ?? null }
         : {}),
       ...(isPrimary && rec.trolleys != null && rec.trolleys > 0
-        ? { trolleysProduced: rec.trolleys, "No. of Trolleys Produced": rec.trolleys }
+        ? {
+            trolleysProduced: rec.trolleys,
+            "No. of Trolleys Produced": rec.trolleys,
+            ...(rec.trolleyDefects && rec.trolleyDefects.length > 0
+              ? { trolleyDefects: rec.trolleyDefects }
+              : {}),
+          }
         : {}),
       ...(isSecondary && rec.bin
         ? { bin: rec.bin, Bin: rec.bin }

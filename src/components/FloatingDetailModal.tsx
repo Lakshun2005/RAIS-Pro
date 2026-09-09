@@ -6,6 +6,7 @@ import Icon from "@/components/editorial/Icon";
 import { BRAND_NAME } from "@/lib/brand";
 import { useActiveMetric } from "@/components/app/ActiveMetricContext";
 import type { RawSheet } from "@/types/dashboard";
+import DefectRemedyShowcase from "@/components/DefectRemedyShowcase";
 import {
   type SourceRow,
   type SourceMetricKind,
@@ -43,6 +44,8 @@ interface FloatingDetailModalProps {
   metricKind?: SourceMetricKind;
   /** Period grouping grain when mode = period. */
   periodGrain?: SourcePeriodGrain;
+  /** Live Pareto ranking — Primary / Secondary / Tertiary remedies. */
+  rankedDefects?: { code: string; label: string }[];
 }
 
 /** A single bezier beam from the computed-value anchor to one highlighted target. */
@@ -119,6 +122,7 @@ export default function FloatingDetailModal({
   originRect,
   metricKind = "generic",
   periodGrain: _periodGrain = "month",
+  rankedDefects = [],
 }: FloatingDetailModalProps) {
   void _periodGrain; // retained on the public prop surface; grouping modes removed
   // No usePolicy() here any more: the rejection formula is locked, so the proof
@@ -658,6 +662,7 @@ export default function FloatingDetailModal({
                   )}
                 </div>
               )}
+              {rankedDefects.length > 0 && <DefectRemedyShowcase ranked={rankedDefects} compact />}
             </>
           ) : (
             <div

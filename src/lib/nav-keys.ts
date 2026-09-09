@@ -7,11 +7,15 @@ export type NavKey =
   | "stage"
   | "size"
   | "defect"
+  | "hold"
+  | "open-lots"
   | "spc"
   | "process-flow"
   | "copq"
   | "reports"
   | "capa"
+  | "remedies"
+  | "alerts"
   | "ask"
   | "audit"
   | "schema"
@@ -43,11 +47,15 @@ export const NAV_ROUTES: Record<NavKey, NavRoute> = {
   stage: { label: "By Stage", href: "/stage-analysis", keywords: "gate visual balloon valve" },
   size: { label: "By Size", href: "/size-analysis", keywords: "fr french size" },
   defect: { label: "By Defect", href: "/defect-analysis", keywords: "pareto reason" },
+  hold: { label: "Hold Quantity", href: "/hold", keywords: "hold rework visual lot stage" },
+  "open-lots": { label: "Open Lots", href: "/open-lots", keywords: "wip stalled waiting batch open complete" },
   spc: { label: "SPC & Control Charts", href: "/spc", keywords: "control chart xbar" },
   "process-flow": { label: "Process Flow", href: "/process-flow", keywords: "fpy flow" },
   copq: { label: "Cost of Rejection", href: "/copq", keywords: "cost rupee money" },
   reports: { label: "Reports", href: "/reports", keywords: "print monthly pack" },
   capa: { label: "CAPA & Actions", href: "/capa", keywords: "action owner" },
+  remedies: { label: "Defect Remedies", href: "/remedies", keywords: "remedy description primary secondary tertiary spike dip" },
+  alerts: { label: "Alerts", href: "/alerts", keywords: "notification history timeline exception" },
   ask: { label: "Ask MOID", href: null, keywords: "assistant copilot chat" },
   audit: { label: "Audit Trail", href: "/audit", keywords: "provenance trust" },
   schema: { label: "Plant Schema", href: "/schema", keywords: "registry stages defects" },

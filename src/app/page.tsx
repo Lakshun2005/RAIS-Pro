@@ -10,6 +10,8 @@ import { useRegistry } from "@/components/app/RegistryContext";
 import Icon from "@/components/editorial/Icon";
 import type { SourceRow, SourceMetricKind } from "@/components/FloatingDetailModal";
 import OpenWipStrip from "@/components/app/OpenWipStrip";
+import DashboardBoard, { DashItem, DashboardLayoutToggle, clearLayout } from "@/components/app/DashboardBoard";
+import { usePersona } from "@/components/app/PersonaContext";
 import type { AuditEventLike } from "@/lib/analytics/audit-sessions";
 import { draftFromRecommendation, blankDraft, titleFromText, type CapaRecord } from "@/lib/capa-store";
 import { useTweaks } from "@/components/editorial/TweaksContext";
@@ -88,6 +90,7 @@ import {
   type QualityStatusT,
   toSourceRows,
   STAGE_LABELS,
+  openWip,
 } from "@/lib/analytics";
 import { decide } from "@/core/decision/engine";
 import { SEED_DECISION_RULES } from "@/core/decision/seed-rules";
@@ -99,6 +102,10 @@ export default function Dashboard() {
   const { t } = useTweaks();
   const { events, isLoading } = useEvents();
   const { registry, policy } = useRegistry();
+  const { authUser, persona } = usePersona();
+  const layoutUser = authUser?.username ?? persona;
+  const [layoutEditing, setLayoutEditing] = useState(false);
+  const [layoutDirty, setLayoutDirty] = useState(false);
   const activeRegistry = registry || EMPTY_REGISTRY;
   const [selectedSize, setSelectedSize] = useState("Fr16");
   const [targetRej, setTargetRej] = useState<number>(0.03);
@@ -110,6 +117,7 @@ export default function Dashboard() {
   const [modalPrimaryValue, setModalPrimaryValue] = useState<string | undefined>(undefined);
   const [modalMetricKind, setModalMetricKind] = useState<SourceMetricKind>("generic");
   const [modalOriginRect, setModalOriginRect] = useState<DOMRect | null>(null);
+  const [modalRankedDefects, setModalRankedDefects] = useState<{ code: string; label: string }[]>([]);
   const [rawSheets, setRawSheets] = useState<any[] | undefined>(undefined);
   const lastClickRect = useRef<DOMRect | null>(null);
 
@@ -128,7 +136,12 @@ export default function Dashboard() {
     title: string,
     insight: string | string[],
     content: React.ReactNode,
-    source?: { rows: SourceRow[]; value: string; metricKind?: SourceMetricKind },
+    source?: {
+      rows: SourceRow[];
+      value: string;
+      metricKind?: SourceMetricKind;
+      rankedDefects?: { code: string; label: string }[];
+    },
   ) => {
     setModalTitle(title);
     setModalInsight(insight);
@@ -136,6 +149,7 @@ export default function Dashboard() {
     setModalSourceRows(source?.rows);
     setModalPrimaryValue(source?.value);
     setModalMetricKind(source?.metricKind ?? "generic");
+    setModalRankedDefects(source?.rankedDefects ?? []);
     setModalOriginRect(lastClickRect.current);
     setModalOpen(true);
   };
@@ -235,10 +249,15 @@ export default function Dashboard() {
       ? `Quality levels for size ${selectedSize} over time.`
       : `No trend data available for size ${selectedSize} in the active period.`;
 
+    const accepted = Math.max(0, checked - rejected);
+    const acceptedRate = checked > 0 ? (checked - rejected) / checked : Math.max(0, 1 - rate);
+
     return {
       rate,
       rejected,
       checked,
+      accepted,
+      acceptedRate,
       fpy: fpyVal,
       stages: orderedStages,
       defects,
@@ -275,6 +294,10 @@ export default function Dashboard() {
 
   // The active view is the GLOBAL stage scope from the header (TweaksContext).
   const activeView = t.stageView;
+
+  useEffect(() => {
+    if (activeView !== "cumulative") setLayoutEditing(false);
+  }, [activeView]);
 
   // Synchronize selected size with the available sizes dataset
   useEffect(() => {
@@ -379,6 +402,7 @@ export default function Dashboard() {
       return {
         rateDiff: "vs Prior Period",
         rejDiff: "vs Prior Period",
+        acceptedDiff: "vs Prior Period",
         fpyDiff: "vs Prior Period",
         copqDiff: "vs Prior Period",
       };
@@ -393,6 +417,12 @@ export default function Dashboard() {
     const rejChange = m.rejected - (prev.value * (m.checked || 1));
     const rejDiffSign = rejChange >= 0 ? "↑" : "↓";
     const rejDiffText = `${rejDiffSign} vs ${prev.label}`;
+
+    const acceptedCur = 1 - cur.value;
+    const acceptedPrev = 1 - prev.value;
+    const acceptedChange = acceptedCur - acceptedPrev;
+    const acceptedDiffSign = acceptedChange >= 0 ? "↑" : "↓";
+    const acceptedDiffText = `${acceptedDiffSign} ${(Math.abs(acceptedChange) * 100).toFixed(2)}% vs ${prev.label}`;
 
     const fpyCur = m.fpy;
     const fpyPrev = 1 - prev.value;
@@ -414,6 +444,7 @@ export default function Dashboard() {
     return {
       rateDiff: rateDiffText,
       rejDiff: rejDiffText,
+      acceptedDiff: acceptedDiffText,
       fpyDiff: fpyDiffText,
       copqDiff: copqDiffText,
     };
@@ -428,6 +459,10 @@ export default function Dashboard() {
     ? [...m.stages].sort((a, b) => b.rejected - a.rejected).find((s) => s.rejected > 0) ?? null
     : null;
   const worstStageByRejs = worstStageRow?.label ?? "—";
+  const wipOpen = useMemo(
+    () => openWip((events ?? []) as AuditEventLike[]).openCount > 0,
+    [events],
+  );
 
   const getDefectRejRate = (defect: any) => {
     if (!m) return 0;
@@ -477,7 +512,7 @@ export default function Dashboard() {
    *  is the existing View Source table, wired separately] / Recommended action.
    *  All figures come from `m` — already-computed, already-sorted selectors —
    *  and `recommendations` (filtered to the ONE most relevant line per metric). */
-  const kpiNarrative = (metric: "rate" | "fpy" | "copq" | "bottleneck", whatHappened: string): string[] => {
+  const kpiNarrative = (metric: "rate" | "accepted" | "fpy" | "copq" | "bottleneck", whatHappened: string): string[] => {
     if (!m) return [whatHappened];
     const lines: string[] = [`What happened: ${whatHappened}`];
 
@@ -557,7 +592,24 @@ export default function Dashboard() {
   };
 
   return (
-    <AppShell active="dashboard" trustScore={m?.trust.pct ?? null} statusCounts={{ anomalies: 0, alerts: 0, capa: 0, overdue: 0 }} dateRange={m?.latestPeriodLabel}>
+    <AppShell
+      active="dashboard"
+      wide
+      trustScore={m?.trust.pct ?? null}
+      statusCounts={{ anomalies: 0, alerts: 0, capa: 0, overdue: 0 }}
+      dateRange={m?.latestPeriodLabel}
+      toolbarExtra={
+        m && activeView === "cumulative" ? (
+          <DashboardLayoutToggle
+            editing={layoutEditing}
+            dirty={layoutDirty}
+            onChangeLayout={() => setLayoutEditing(true)}
+            onFixLayout={() => setLayoutEditing(false)}
+            onReset={() => clearLayout(layoutUser)}
+          />
+        ) : null
+      }
+    >
       {isLoading && (
         <PageLoader message="Initializing the intelligence ledger..." minHeight="60vh" />
       )}
@@ -602,8 +654,9 @@ export default function Dashboard() {
               />
             )
           ) : (
-            <>
+            <DashboardBoard userKey={layoutUser} editing={layoutEditing} onDirtyChange={setLayoutDirty}>
               {/* Section 1: Executive KPIs */}
+              <DashItem id="kpis" span={12}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0, 1fr))", gap: "var(--gap-grid)" }}>
                 <Kpi
                   primary
@@ -622,17 +675,17 @@ export default function Dashboard() {
                 />
                 <Kpi
                   primary
-                  label="First Pass Yield"
-                  value={pct(m.fpy)}
-                  detail={`${num(m.checked)} entered · ${num(m.rejected)} rejected`}
-                  sub={stats.fpyDiff}
-                  tone={m.fpy >= (1 - targetRej) ? "good" : "bad"}
+                  label="Overall Accepted"
+                  value={pct(m.acceptedRate)}
+                  detail={`${num(m.accepted)} accepted · ${num(m.checked)} checked`}
+                  sub={stats.acceptedDiff}
+                  tone={m.acceptedRate >= (1 - targetRej) ? "good" : "bad"}
                   spark={m.tr.map(p => ({ ...p, value: 1 - p.value }))}
                   onClick={() => openModal(
-                    `${grainLabel} First Pass Yield — Drill-down`,
-                    kpiNarrative("fpy", `First Pass Yield stands at ${pct(m.fpy)} for the latest period (${stats.fpyDiff}).`),
-                    <div style={{ minHeight: 220, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.tr.map(p => ({ ...p, value: 1 - p.value }))} fmt={pct} /></div>,
-                    { rows: rejectionSrc(), value: pct(m.fpy), metricKind: "rejection_rate" },
+                    `${grainLabel} Acceptance Rate — Drill-down`,
+                    kpiNarrative("accepted", `Overall accepted rate stands at ${pct(m.acceptedRate)} (${num(m.accepted)} of ${num(m.checked)} checked), compared to the target acceptance of ${pct(1 - targetRej)} (${stats.acceptedDiff}).`),
+                    <div style={{ minHeight: 220, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.tr.map(p => ({ ...p, value: 1 - p.value }))} target={1 - targetRej} fmt={pct} /></div>,
+                    { rows: rejectionSrc(), value: pct(m.acceptedRate), metricKind: "rejection_rate" },
                   )}
                 />
                 <Kpi
@@ -668,7 +721,15 @@ export default function Dashboard() {
                     `Top Defect — ${m.defects[0].label}`,
                     `The top defect category is ${m.defects[0].label}, accounting for ${m.defects[0].rejected.toLocaleString()} rejects (${m.defects[0].pct.toFixed(1)}% of all rejections).`,
                     <div style={{ minHeight: 220, display: "flex", flexDirection: "column", justifyContent: "center" }}><ParetoChart analysis={calculatePareto(m.defects.map(d => ({ label: d.label, value: d.rejected }))) || { items: [], totalDefects: 0, vitalFewCount: 0, vitalFewContribution: 0, criticalAreaText: "" }} showTable={true} /></div>,
-                    { rows: srcRows({ defectCode: m.defects[0].label, types: ["rejection"] }), value: m.defects[0].rejected.toLocaleString(), metricKind: "pareto" }
+                    {
+                      rows: srcRows({ defectCode: m.defects[0].label, types: ["rejection"] }),
+                      value: m.defects[0].rejected.toLocaleString(),
+                      metricKind: "pareto",
+                      rankedDefects: m.defects.slice(0, 3).map((d) => ({
+                        code: d.label,
+                        label: d.label,
+                      })),
+                    }
                   )}
                 />
                 <Kpi
@@ -687,18 +748,15 @@ export default function Dashboard() {
                   )}
                 />
               </div>
+              </DashItem>
 
-              {/* Not a sixth KPI: this is a worklist, not a rate. */}
-              <OpenWipStrip events={(events ?? []) as AuditEventLike[]} />
+              {wipOpen && (
+                <DashItem id="wip" span={12} handle="start">
+                  <OpenWipStrip events={(events ?? []) as AuditEventLike[]} embedded />
+                </DashItem>
+              )}
 
-              {/* Row 1: Primary Rejection Analytics (3-column layout) */}
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                gap: "var(--gap-grid)",
-                marginTop: "var(--gap-grid)"
-              }}>
-                {/* Card 1: Rejection Trend */}
+              <DashItem id="trend" span={4}>
                 <Card
                   title="Rejection Trend"
                   sub={`Target (${(targetRej * 100).toFixed(0)}%) & Mean`}
@@ -723,8 +781,9 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </Card>
+              </DashItem>
 
-                {/* Card 2: Rejection By Stage */}
+              <DashItem id="by-stage" span={4}>
                 <Card
                   title="Rejection By Stage"
                   sub="YTD Rejection Shares"
@@ -769,8 +828,9 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </Card>
+              </DashItem>
 
-                {/* Card 3: Top Defects (Pareto) */}
+              <DashItem id="pareto" span={4}>
                 <Card
                   title="Top Defects (Pareto)"
                   sub="YTD Rejections"
@@ -780,7 +840,15 @@ export default function Dashboard() {
                     <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}>
                       <ParetoChart analysis={calculatePareto(m.defects.map(d => ({ label: d.label, value: d.rejected }))) || { items: [], totalDefects: 0, vitalFewCount: 0, vitalFewContribution: 0, criticalAreaText: "No defect data available for this period." }} showTable={false} />
                     </div>,
-                    { rows: srcRows({ types: ["rejection"] }), value: num(m.defects.reduce((s, d) => s + d.rejected, 0)), metricKind: "pareto" }
+                    {
+                      rows: srcRows({ types: ["rejection"] }),
+                      value: num(m.defects.reduce((s, d) => s + d.rejected, 0)),
+                      metricKind: "pareto",
+                      rankedDefects: m.defects.slice(0, 3).map((d) => ({
+                        code: d.label,
+                        label: d.label,
+                      })),
+                    }
                   )}
                 >
                   <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "space-between", height: "100%" }}>
@@ -846,15 +914,9 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </Card>
-              </div>
+              </DashItem>
 
-              {/* Row 2: Stage wise Rejection Trend (Full Width) */}
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: "1fr",
-                gap: "var(--gap-grid)",
-                marginTop: "var(--gap-grid)"
-              }}>
+              <DashItem id="stage-trend" span={12}>
                 <Card
                   title={`Stage-wise Rejection Trend (${grainLabel})`}
                   sub="per-stage + Total — hover for values"
@@ -862,11 +924,10 @@ export default function Dashboard() {
                 >
                   <MultiLine data={m.cumTrend} stages={[...m.stagesAll.map((s) => ({ stageId: s.stageId, label: s.label })), { stageId: CUM_TOTAL_KEY, label: "Total" }]} height={180} />
                 </Card>
-              </div>
+              </DashItem>
 
-              {/* Row 4: Stage x Size Concentration Heatmap */}
               {m.stageSize.length > 0 && (
-                <div style={{ marginTop: "var(--gap-grid)" }}>
+                <DashItem id="heatmap" span={12}>
                   <Card
                     title="Stage x Size Concentration"
                     sub="Rejection rate by stage and catheter size (warmer cells indicate concentration hotspots)"
@@ -879,115 +940,88 @@ export default function Dashboard() {
                   >
                     <StageSizeHeatmap cells={m.stageSize} />
                   </Card>
-                </div>
+                </DashItem>
               )}
 
-              {/* Row 5: Size Analytics */}
-              {(() => {
-                const hasSizeYtd = m.sizes.length > 0;
-                const hasSizeTrend = hasSizeYtd && m.sizeTrend.length > 0;
-                if (!hasSizeYtd) return null;
-                const gridCols = hasSizeTrend ? "minmax(0, 1fr) minmax(0, 2fr)" : "minmax(0, 1fr)";
-                return (
-                  <div style={{
-                    display: "grid",
-                    gridTemplateColumns: gridCols,
-                    gap: "var(--gap-grid)",
-                    marginTop: "var(--gap-grid)"
-                  }}>
-                    <Card
-                      title="Rejection by Size (YTD)"
-                      sub={m.worstSize ? `Worst: ${m.worstSize.size}` : "YTD"}
-                      onClick={() => openModal("Size-wise Rejection (YTD)", m.sizeWiseInsight, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><BarsH rows={m.sizes.map((s) => ({ label: s.size, value: s.rejRate * 100, sub: `${s.rejected.toLocaleString("en-IN")} rejected of ${s.checked.toLocaleString("en-IN")}` }))} fmt={(n) => `${n.toFixed(1)}%`} /></div>, { rows: srcRows({ types: ["inspection", "rejection"] }).filter(r => r.size), value: m.sizes.length ? `${(Math.max(...m.sizes.map(s => s.rejRate)) * 100).toFixed(1)}%` : "—", metricKind: "size" })}
+              {m.sizes.length > 0 && (
+                <DashItem id="size-ytd" span={m.sizeTrend.length > 0 ? 4 : 12}>
+                  <Card
+                    title="Rejection by Size (YTD)"
+                    sub={m.worstSize ? `Worst: ${m.worstSize.size}` : "YTD"}
+                    onClick={() => openModal("Size-wise Rejection (YTD)", m.sizeWiseInsight, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><BarsH rows={m.sizes.map((s) => ({ label: s.size, value: s.rejRate * 100, sub: `${s.rejected.toLocaleString("en-IN")} rejected of ${s.checked.toLocaleString("en-IN")}` }))} fmt={(n) => `${n.toFixed(1)}%`} /></div>, { rows: srcRows({ types: ["inspection", "rejection"] }).filter(r => r.size), value: m.sizes.length ? `${(Math.max(...m.sizes.map(s => s.rejRate)) * 100).toFixed(1)}%` : "—", metricKind: "size" })}
+                  >
+                    <BarsH rows={m.sizes.map((s) => ({ label: s.size, value: s.rejRate * 100, sub: `${s.rejected.toLocaleString("en-IN")} rejected of ${s.checked.toLocaleString("en-IN")}` }))} fmt={(n) => `${n.toFixed(1)}%`} />
+                  </Card>
+                </DashItem>
+              )}
+
+              {m.sizes.length > 0 && m.sizeTrend.length > 0 && (
+                <DashItem id="size-trend" span={8}>
+                  <Card
+                    title={`Size Trend (${selectedSize})`}
+                    onClick={() => openModal(`Size-wise Trend (${selectedSize})`, m.sizeTrendInsight, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.sizeTrend} fmt={pct} /></div>, { rows: srcRows({ types: ["production", "inspection"], size: selectedSize }), value: m.sizeTrend.length ? pct(m.sizeTrend[m.sizeTrend.length - 1].value) : "—", metricKind: "size" })}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
+                      <span className="muted" style={{ fontSize: 11, fontWeight: 600 }}>Size:</span>
+                      <Select
+                        value={selectedSize}
+                        onChange={setSelectedSize}
+                        options={(m.sizes.length > 0 ? m.sizes.map((s) => s.size) : ["Fr10", "Fr12", "Fr14", "Fr16", "Fr18", "Fr20", "Fr22", "Fr24"]).map((sz) => ({ value: sz, label: sz }))}
+                        block={false}
+                        mono
+                        size="sm"
+                        ariaLabel="Size for trend"
+                        style={{ minWidth: 92 }}
+                      />
+                    </div>
+                    <LineChart points={m.sizeTrend} fmt={pct} height={180} />
+                  </Card>
+                </DashItem>
+              )}
+
+              {m.copqTrend.length > 0 && (
+                <DashItem id="copq" span={5}>
+                  <Card
+                    title={`COPQ Trend (${grainLabel})`}
+                    onClick={() => openModal(`COPQ Trend (${grainLabel})`, `Cost of poor quality trends across historical periods.`, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.copqTrend} fmt={rupee} /></div>, { rows: srcRows({ types: ["inspection", "rejection"] }), value: rupee(m.copq), metricKind: "copq" })}
+                  >
+                    <LineChart points={m.copqTrend} fmt={rupee} height={180} />
+                  </Card>
+                </DashItem>
+              )}
+
+              <DashItem id="audit" span={m.copqTrend.length > 0 ? 7 : 12}>
+                <Card
+                  title="Audit &amp; Verification"
+                  onClick={() => openModal("Audit & Verification", "Counted off the ledger in the current scope — no targets, no estimates.", <div style={{ minHeight: 200, display: "flex", flexDirection: "column", justifyContent: "center" }}><AuditVerificationTable summary={m.audit} /></div>)}
+                >
+                  <AuditVerificationTable summary={m.audit} />
+                  <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); router.push("/audit"); }}
+                      style={{
+                        background: "var(--surface-2)",
+                        border: "1px solid var(--border-strong)",
+                        borderRadius: "var(--radius-sm)",
+                        padding: "6px 16px",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        width: "100%"
+                      }}
                     >
-                      <BarsH rows={m.sizes.map((s) => ({ label: s.size, value: s.rejRate * 100, sub: `${s.rejected.toLocaleString("en-IN")} rejected of ${s.checked.toLocaleString("en-IN")}` }))} fmt={(n) => `${n.toFixed(1)}%`} />
-                    </Card>
-
-                    {hasSizeTrend && (
-                      <Card
-                        title={`Size Trend (${selectedSize})`}
-                        onClick={() => openModal(`Size-wise Trend (${selectedSize})`, m.sizeTrendInsight, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.sizeTrend} fmt={pct} /></div>, { rows: srcRows({ types: ["production", "inspection"], size: selectedSize }), value: m.sizeTrend.length ? pct(m.sizeTrend[m.sizeTrend.length - 1].value) : "—", metricKind: "size" })}
-                      >
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }} onClick={(e) => e.stopPropagation()}>
-                          <span className="muted" style={{ fontSize: 11, fontWeight: 600 }}>Size:</span>
-                          <Select
-                            value={selectedSize}
-                            onChange={setSelectedSize}
-                            options={(m.sizes.length > 0 ? m.sizes.map((s) => s.size) : ["Fr10", "Fr12", "Fr14", "Fr16", "Fr18", "Fr20", "Fr22", "Fr24"]).map((sz) => ({ value: sz, label: sz }))}
-                            block={false}
-                            mono
-                            size="sm"
-                            ariaLabel="Size for trend"
-                            style={{ minWidth: 92 }}
-                          />
-                        </div>
-                        <LineChart points={m.sizeTrend} fmt={pct} height={180} />
-                      </Card>
-                    )}
+                      View Audit Trail
+                    </button>
                   </div>
-                );
-              })()}
+                </Card>
+              </DashItem>
 
-              {/* Row 6: COPQ & Audit Trail */}
-              {(() => {
-                const hasCopq = m.copqTrend.length > 0;
-                const colList = [
-                  hasCopq ? "minmax(0, 1fr)" : null,
-                  "minmax(0, 1.2fr)"
-                ].filter(Boolean);
-                const gridCols = colList.join(" ");
-                return (
-                  <div style={{
-                    display: "grid",
-                    gridTemplateColumns: gridCols,
-                    gap: "var(--gap-grid)",
-                    marginTop: "var(--gap-grid)"
-                  }}>
-                    {hasCopq && (
-                      <Card
-                        title={`COPQ Trend (${grainLabel})`}
-                        onClick={() => openModal(`COPQ Trend (${grainLabel})`, `Cost of poor quality trends across historical periods.`, <div style={{ minHeight: 240, display: "flex", flexDirection: "column", justifyContent: "center" }}><LineChart points={m.copqTrend} fmt={rupee} /></div>, { rows: srcRows({ types: ["inspection", "rejection"] }), value: rupee(m.copq), metricKind: "copq" })}
-                      >
-                        <LineChart points={m.copqTrend} fmt={rupee} height={180} />
-                      </Card>
-                    )}
-
-                    <Card
-                      title="Audit &amp; Verification"
-                      onClick={() => openModal("Audit & Verification", "Counted off the ledger in the current scope — no targets, no estimates.", <div style={{ minHeight: 200, display: "flex", flexDirection: "column", justifyContent: "center" }}><AuditVerificationTable summary={m.audit} /></div>)}
-                    >
-                      <AuditVerificationTable summary={m.audit} />
-                      <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); router.push("/audit"); }}
-                          style={{
-                            background: "var(--surface-2)",
-                            border: "1px solid var(--border-strong)",
-                            borderRadius: "var(--radius-sm)",
-                            padding: "6px 16px",
-                            fontSize: 12,
-                            fontWeight: 600,
-                            cursor: "pointer",
-                            width: "100%"
-                          }}
-                        >
-                          View Audit Trail
-                        </button>
-                      </div>
-                    </Card>
-                  </div>
-                );
-              })()}
-
-              {/* Quality Status strip — comparison frame (target / watch / prior) + integrity. */}
-              <div style={{ marginTop: "var(--gap-grid)" }}>
+              <DashItem id="quality" span={12}>
                 <QualityStatusStrip status={m.status} />
-              </div>
+              </DashItem>
 
-              {/* Production funnel: entry qty → loss at each gate → final good.
-              Gate click = mid-path entry (stage analysis with carried scope). */}
               {m.stages.length > 0 && (
-                <div style={{ marginTop: "var(--gap-grid)" }}>
+                <DashItem id="funnel" span={12}>
                   <Card
                     title="Production Funnel"
                     sub={`${num(m.checked)} units entered · First Pass Yield ${pct(m.fpy)} · click a gate to investigate`}
@@ -1008,21 +1042,19 @@ export default function Dashboard() {
                       }}
                     />
                   </Card>
-                </div>
+                </DashItem>
               )}
 
-              {/* Attention rail: ranked next steps with carried investigation scope. */}
-              <div style={{ marginTop: "var(--gap-grid)" }}>
+              <DashItem id="attention" span={12}>
                 <AttentionRail
                   m={m}
                   targetRej={targetRej}
                   base={m.investigationBase}
                   onGo={(path, state) => goInvestigation(router.push.bind(router), path, state)}
                 />
-              </div>
+              </DashItem>
 
-              {/* Section 3: AI Diagnostics & Actionable Brief */}
-              <div style={{ marginTop: "var(--gap-grid)" }}>
+              <DashItem id="ai-brief" span={12}>
                 <Card title="AI Diagnostics & Actionable Brief">
                   <div style={{
                     display: "grid",
@@ -1170,8 +1202,8 @@ export default function Dashboard() {
                     </div>
                   </div>
                 </Card>
-              </div>
-            </>
+              </DashItem>
+            </DashboardBoard>
           )}
 
           {/* Ask the ledger your own question. Inherits the topbar's date range
@@ -1207,6 +1239,7 @@ export default function Dashboard() {
           periodGrain={t.grain === "week" ? "week" : t.grain === "day" ? "day" : "month"}
           rawSheets={rawSheets}
           originRect={modalOriginRect}
+          rankedDefects={modalRankedDefects}
         >
           {modalContent}
         </FloatingDetailModal>
@@ -1489,7 +1522,12 @@ function StationView({ events, stageId, label, scope, trendScope, grainLabel, ta
         />
         <Kpi label="Quantity Checked" value={num(d.checked)} detail="units entered this gate" />
         <Kpi label="Total Rejected" value={num(d.rejected)} detail={d.checked > 0 ? `${pct(d.rate)} of checked` : undefined} tone="bad" />
-        <Kpi label="First Pass Yield" value={pct(d.fpy)} detail={`${num(d.checked)} entered · ${num(d.rejected)} rejected`} tone={d.fpy >= 1 - targetRej ? "good" : "bad"} />
+        <Kpi
+          label="Overall Accepted"
+          value={pct(d.checked > 0 ? (d.checked - d.rejected) / d.checked : 1 - d.rate)}
+          detail={`${num(Math.max(0, d.checked - d.rejected))} accepted · ${num(d.checked)} checked`}
+          tone={(d.checked > 0 ? (d.checked - d.rejected) / d.checked : 1 - d.rate) >= 1 - targetRej ? "good" : "bad"}
+        />
       </div>
 
       <Card title={`${label} — Rejection % Trend (${grainLabel})`} sub="recomputed from raw checked / rejected"

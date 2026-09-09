@@ -56,6 +56,8 @@ export default function BatchIdField({
   size,
   disabled = false,
   recordedOn,
+  memoryOn = false,
+  onToggleMemory,
 }: {
   batchId: string;
   onBatchIdChange: (raw: string) => void;
@@ -66,6 +68,9 @@ export default function BatchIdField({
   disabled?: boolean;
   /** Shown only to contrast the two dates when they differ. */
   recordedOn: string;
+  /** Pin this lot so Secondary and Assembly reuse it. */
+  memoryOn?: boolean;
+  onToggleMemory?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState<{ left: number; top: number; width: number } | null>(null);
@@ -136,7 +141,7 @@ export default function BatchIdField({
           onChange={(e) => onBatchIdChange(e.target.value)}
           disabled={disabled}
           maxLength={10}
-          placeholder="26F27-14"
+          placeholder="e.g. 26H01-16"
           aria-label="Batch or lot ID"
           title="Lot identity. Type it, or set the lot date. It never changes when Recorded on moves."
           style={{
@@ -186,6 +191,52 @@ export default function BatchIdField({
         >
           Change
         </button>
+        {onToggleMemory && (
+          <button
+            type="button"
+            onClick={onToggleMemory}
+            aria-pressed={memoryOn}
+            aria-label={
+              memoryOn
+                ? "Lot memory on. This lot stays as you move Dipping, Secondary, Assembly."
+                : "Turn lot memory on. Remembers this lot for Secondary and Assembly."
+            }
+            title={
+              memoryOn
+                ? "Memory on — this lot carries into Secondary and Assembly. Click to release."
+                : "Memory — pin this lot at Dipping and reuse it on Secondary and Assembly."
+            }
+            style={{
+              flexShrink: 0,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "0 10px",
+              borderRadius: "var(--radius-sm)",
+              border: `1px solid ${memoryOn ? "var(--accent)" : "var(--border)"}`,
+              background: memoryOn ? "var(--accent)" : "transparent",
+              color: memoryOn ? "var(--text-invert)" : "var(--accent-text)",
+              fontSize: "var(--text-xs)",
+              fontWeight: 600,
+              fontFamily: "inherit",
+              whiteSpace: "nowrap",
+              cursor: "pointer",
+              transition:
+                "background-color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out)",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+              <path
+                d="M3.5 1.5h5v3.2L10 6.5H2l1.5-1.8V1.5Z"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinejoin="round"
+              />
+              <path d="M6 6.5V10.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+            Memory
+          </button>
+        )}
       </div>
 
       {/* Row 2: how the code is composed. A fixed four-column grid, not a
@@ -223,13 +274,27 @@ export default function BatchIdField({
           style={{
             margin: "8px 0 0",
             fontSize: "var(--text-xs)",
-            color: "var(--warning)",
+            color: batchId.trim() ? "var(--warning)" : "var(--text-3)",
             lineHeight: 1.45,
           }}
         >
           {batchId.trim()
-            ? "Not a full lot code yet — it needs a size, like 26F27-14"
-            : "No lot set"}
+            ? "Not a full lot code yet — it needs a size, like 26H01-16"
+            : "Type a lot code, or tap Change to set the lot date."}
+        </p>
+      )}
+
+      {memoryOn && (
+        <p
+          style={{
+            margin: "6px 0 0",
+            fontSize: "var(--text-2xs)",
+            color: "var(--accent-text)",
+            lineHeight: 1.45,
+            fontWeight: 600,
+          }}
+        >
+          Remembered — this lot stays as you move Dipping → Secondary → Assembly.
         </p>
       )}
 

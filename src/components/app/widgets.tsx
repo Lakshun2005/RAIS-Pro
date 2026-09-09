@@ -487,7 +487,7 @@ export function LineChart({
   color = "#C8421C",
   stage,
   metric,
-  height = 280
+  height = 280,
 }: {
   points: SeriesPoint[];
   target?: number;
@@ -704,16 +704,22 @@ export function LineChart({
 
 const SERIES_COLORS = ["#2563EB", "#0D9488", "#D97706", "#DC2626", "#EC4899", "#65A30D"];
 
+export function seriesColor(index: number): string {
+  return SERIES_COLORS[((index % SERIES_COLORS.length) + SERIES_COLORS.length) % SERIES_COLORS.length];
+}
+
 export function MultiLine({
   data,
   stages,
   fmt,
-  height = 296
+  height = 296,
+  colorByStageId,
 }: {
   data: StageTrendPoint[];
   stages: { stageId: string; label: string }[];
   fmt?: (n: number) => string;
   height?: number;
+  colorByStageId?: Record<string, string>;
 }) {
   const [zoom, setZoom] = useState(1.0);
   const [scrollLeft, setScrollLeft] = useState(0);
@@ -767,7 +773,7 @@ export function MultiLine({
     if (s.stageId === "total" || s.label.toLowerCase() === "total") {
       return "#39FF14"; // Neon green
     }
-    return SERIES_COLORS[si % SERIES_COLORS.length];
+    return colorByStageId?.[s.stageId] ?? SERIES_COLORS[si % SERIES_COLORS.length];
   };
 
   const buffer = 10;

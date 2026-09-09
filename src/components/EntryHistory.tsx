@@ -24,11 +24,15 @@ import {
   isDirectEntry,
   batchFiguresInconsistent,
   listRowSizes,
+  batchOf,
   type AuditBatchGroup,
   type AuditEntryRow,
   type AuditEventLike,
 } from "@/lib/analytics/audit-sessions";
 import { buildBatchProgress, progressFor } from "@/lib/analytics/batch-progress";
+import { buildLineStatus, type LineStatus } from "@/lib/entry/line-status";
+import { resolveEntrySchema } from "@/lib/entry/entry-schema";
+import { canonicalBatchId } from "@/lib/entry/batch-id";
 import LotProgress from "@/components/LotProgress";
 import EntryRevisionHistory from "@/components/entry/EntryRevisionHistory";
 import Icon from "@/components/editorial/Icon";
@@ -40,12 +44,15 @@ import {
   categoryAndTypeFrom,
   describeProductType,
   sizesFor,
+  SHIFT_STORAGE_KEY,
+  type ShiftBatchRecord,
   type CatheterCategory,
   type CatheterType,
 } from "@/lib/entry/disposafe-matrix";
 
 type SourceScope = "mine" | "all";
 type StatusScope = "all" | "open" | "complete";
+type LedgerScope = "all" | "synced" | "pending";
 type SortOption = "newest" | "oldest" | "batch-asc" | "batch-desc" | "volume-desc" | "rejection-desc";
 
 
@@ -78,7 +85,89 @@ function compactRange(from: string, to: string): string {
   return `${fmt(from, !sameMonth)}–${fmt(to, true)}`;
 }
 
-const HISTORY_COLS = "16px minmax(92px, 1.1fr) minmax(96px, 0.9fr) 150px 76px 76px 76px";
+const HISTORY_COLS = "16px minmax(88px, 0.9fr) minmax(84px, 0.8fr) minmax(310px, 3fr) 76px 76px 76px";
+
+function BatchProcessTrack({
+  lineStatus,
+  progress,
+}: {
+  lineStatus?: LineStatus | null;
+  progress?: ReturnType<typeof progressFor>;
+}) {
+  if (!lineStatus || lineStatus.lanes.length === 0) {
+    return progress && progress.doneCount > 0 ? (
+      <LotProgress progress={progress} showLabels={false} />
+    ) : (
+      <span style={{ color: "var(--text-3)", fontSize: "var(--text-xs)" }}>—</span>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
+      {lineStatus.lanes.map((lane) => {
+        const isPrimary = lane.id === "primary";
+        const isSecondary = lane.id === "secondary";
+        const isAssembly = lane.id === "assembly";
+        const shortName = isPrimary ? "Primary Dipping" : isSecondary ? "Secondary" : isAssembly ? "Assembly" : lane.label;
+        const isDone = lane.complete;
+        const isStarted = lane.started && !lane.complete;
+
+        const countText = isDone
+          ? isPrimary
+            ? "completed"
+            : `${lane.done}/${lane.total} completed`
+          : isStarted
+            ? `${lane.done}/${lane.total}`
+            : "—";
+
+        const tagColor = isDone
+          ? "var(--positive)"
+          : isStarted
+            ? "var(--status-warn, #d97706)"
+            : "var(--text-3)";
+        const tagBg = isDone
+          ? "var(--positive-weak)"
+          : isStarted
+            ? "var(--warning-weak)"
+            : "var(--surface-2)";
+
+        return (
+          <span
+            key={lane.id}
+            title={`${lane.label}: ${isDone ? "Completed" : isStarted ? `${lane.done}/${lane.total} complete` : "Not started"}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 3.5,
+              fontSize: "11px",
+              padding: "1.5px 6px",
+              borderRadius: "4px",
+              background: tagBg,
+              color: tagColor,
+              border: `1px solid color-mix(in srgb, ${tagColor} 26%, transparent)`,
+              whiteSpace: "nowrap",
+              lineHeight: 1.25,
+              fontFamily: "var(--font-sans)",
+            }}
+          >
+            <span style={{ fontSize: 8 }}>{isDone ? "✓" : isStarted ? "●" : "○"}</span>
+            <span style={{ fontWeight: 600 }}>{shortName}</span>
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "10px",
+                fontWeight: isDone || isStarted ? 700 : 400,
+                opacity: 0.95,
+              }}
+            >
+              {countText}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 /** Right-aligned tabular figure; a zero reads as a dash, not a loud 0. */
 function Cell({ value, tone }: { value: number; tone?: string }) {
@@ -138,20 +227,132 @@ export default function EntryHistory({
   const [search, setSearch] = useState("");
   const [scope, setScope] = useState<SourceScope>("mine");
   const [status, setStatus] = useState<StatusScope>(initialStatus);
-  const [size, setSize] = useState("all");
+  const [ledgerFilter, setLedgerFilter] = useState<LedgerScope>("all");
+  const [groupByLedger, setGroupByLedger] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [productTypeFilter, setProductTypeFilter] = useState("all");
+  const [size, setSize] = useState("all");
   const [sortOrder, setSortOrder] = useState<SortOption>("newest");
   const [openBatch, setOpenBatch] = useState<string | null>(null);
   const [historyRow, setHistoryRow] = useState<AuditEntryRow | null>(null);
+  const [localShiftRows, setLocalShiftRows] = useState<AuditEntryRow[]>([]);
+
+  // Load unsynced shift batches from localStorage to show realtime "not on ledger" batches
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = localStorage.getItem(SHIFT_STORAGE_KEY);
+      if (!raw) {
+        setLocalShiftRows([]);
+        return;
+      }
+      const parsed: ShiftBatchRecord[] = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+
+      const uncommitted = parsed.filter((r) => !r.synced);
+      if (uncommitted.length === 0) {
+        setLocalShiftRows([]);
+        return;
+      }
+
+      // Convert unsynced shift records to AuditEntryRow
+      const converted: AuditEntryRow[] = uncommitted.map((r) => {
+        const defectsList = Object.entries(r.defects || {})
+          .filter(([, qty]) => qty > 0)
+          .map(([code, qty]) => ({ code, qty }));
+
+        return {
+          id: `local:${r.id}`,
+          date: r.date,
+          batch: r.batchId,
+          stageId: r.stageId || r.micro || "production",
+          size: r.size || null,
+          checked: r.checked || 0,
+          accepted: r.accept || 0,
+          rejected: r.reject || 0,
+          rework: r.hold || 0,
+          defects: defectsList,
+          source: "manual",
+          fileLabel: "Local shift log (not on ledger)",
+          recordedAt: r.savedAt,
+          eventIds: [], // Empty eventIds identifies local uncommitted entries
+          commentCount: 0,
+          hasCorrection: false,
+          revisionCount: 1,
+          shifts: r.shift ? [r.shift] : [],
+          productType: r.productType || null,
+        };
+      });
+
+      setLocalShiftRows(converted);
+    } catch {
+      setLocalShiftRows([]);
+    }
+  }, [events]);
 
   const progressMap = useMemo(() => buildBatchProgress(events), [events]);
+
+  const lineStatusMap = useMemo(() => {
+    const schema = resolveEntrySchema(null);
+    const map = new Map<string, LineStatus>();
+    const batchOccupied = new Map<string, Set<string>>();
+
+    for (const e of events) {
+      const raw = batchOf(e);
+      if (!raw) continue;
+      const b = canonicalBatchId(raw) ?? raw.trim().toUpperCase();
+      if (!b) continue;
+      let set = batchOccupied.get(b);
+      if (!set) {
+        set = new Set();
+        batchOccupied.set(b, set);
+      }
+      if (
+        e.stageId &&
+        ((e.quantity ?? 0) > 0 ||
+          e.eventType === "production" ||
+          e.eventType === "inspection" ||
+          e.eventType === "rejection")
+      ) {
+        set.add(e.stageId);
+      }
+    }
+
+    // Also factor in local unsynced stages
+    for (const r of localShiftRows) {
+      const b = canonicalBatchId(r.batch) ?? r.batch.trim().toUpperCase();
+      if (!b) continue;
+      let set = batchOccupied.get(b);
+      if (!set) {
+        set = new Set();
+        batchOccupied.set(b, set);
+      }
+      if (r.stageId) {
+        set.add(r.stageId);
+      }
+    }
+
+    for (const [batch, occ] of batchOccupied) {
+      map.set(batch, buildLineStatus({ lot: batch, schema, occupied: occ }));
+    }
+    return map;
+  }, [events, localShiftRows]);
 
   /** Sizes are scoped to the current source so the list never offers a dead option. */
   const scopedRows = useMemo(() => {
     const scoped = scope === "mine" ? events.filter(isDirectEntry) : events;
-    return buildEntryRows(scoped);
-  }, [events, scope]);
+    const ledgerRows = buildEntryRows(scoped);
+
+    if (localShiftRows.length === 0) return ledgerRows;
+
+    // Merge local rows if not already represented in ledger
+    const existingKeys = new Set(ledgerRows.map((r) => `${r.batch}::${r.stageId}::${r.date}`));
+    const nonDuplicatedLocal = localShiftRows.filter(
+      (lr) => !existingKeys.has(`${lr.batch}::${lr.stageId}::${lr.date}`)
+    );
+
+    return [...nonDuplicatedLocal, ...ledgerRows];
+  }, [events, scope, localShiftRows]);
 
   const sizeOptions = useMemo(() => listRowSizes(scopedRows), [scopedRows]);
 
@@ -203,7 +404,15 @@ export default function EntryHistory({
     ];
   }, [categoryFilter]);
 
-  const groups = useMemo(() => {
+  // Helper to check if a batch group is on ledger
+  const isGroupOnLedger = (g: AuditBatchGroup) => {
+    // If all rows in all stages have eventIds > 0, it's on ledger.
+    // If any row has eventIds.length === 0 or comes from local shift log, it's pending/not on ledger.
+    const allRows = g.stages.flatMap((s) => s.rows);
+    return allRows.length > 0 && allRows.every((r) => r.eventIds && r.eventIds.length > 0);
+  };
+
+  const baseGroups = useMemo(() => {
     let rows = filterEntryRows(scopedRows, { search, size });
     if (categoryFilter !== "all" || productTypeFilter !== "all") {
       rows = rows.filter((r) => {
@@ -216,8 +425,8 @@ export default function EntryHistory({
     let all = groupByBatchThenStage(rows);
     if (status !== "all") {
       all = all.filter((g) => {
-        const p = progressFor(progressMap, g.batch);
-        const complete = p?.status === "complete";
+        const ls = lineStatusMap.get(g.batch);
+        const complete = ls ? ls.isComplete : progressFor(progressMap, g.batch)?.status === "complete";
         return status === "complete" ? complete : !complete;
       });
     }
@@ -230,9 +439,44 @@ export default function EntryHistory({
       if (sortOrder === "rejection-desc") return b.rejectedQty - a.rejectedQty || a.batch.localeCompare(b.batch);
       return 0;
     });
-  }, [scopedRows, search, size, categoryFilter, productTypeFilter, status, sortOrder, progressMap]);
+  }, [scopedRows, search, size, categoryFilter, productTypeFilter, status, sortOrder, progressMap, lineStatusMap]);
+
+  // Counts for ledger pills
+  const totalBatchCount = baseGroups.length;
+  const onLedgerCount = useMemo(() => baseGroups.filter(isGroupOnLedger).length, [baseGroups]);
+  const notOnLedgerCount = useMemo(() => baseGroups.filter((g) => !isGroupOnLedger(g)).length, [baseGroups]);
+
+  // Filtered groups according to ledger filter
+  const groups = useMemo(() => {
+    if (ledgerFilter === "synced") {
+      return baseGroups.filter(isGroupOnLedger);
+    }
+    if (ledgerFilter === "pending") {
+      return baseGroups.filter((g) => !isGroupOnLedger(g));
+    }
+    return baseGroups;
+  }, [baseGroups, ledgerFilter]);
 
   const periods = useMemo(() => groupByPeriod(groups, grain), [groups, grain]);
+
+  // Partitioned periods when Group by Status is active
+  const groupedSections = useMemo(() => {
+    if (!groupByLedger || ledgerFilter !== "all") return null;
+
+    const onLedgerGroups = baseGroups.filter(isGroupOnLedger);
+    const notOnLedgerGroups = baseGroups.filter((g) => !isGroupOnLedger(g));
+
+    return {
+      onLedger: {
+        count: onLedgerGroups.length,
+        periods: groupByPeriod(onLedgerGroups, grain),
+      },
+      notOnLedger: {
+        count: notOnLedgerGroups.length,
+        periods: groupByPeriod(notOnLedgerGroups, grain),
+      },
+    };
+  }, [groupByLedger, ledgerFilter, baseGroups, grain]);
 
   const summary = useMemo(() => {
     let open = 0;
@@ -240,12 +484,14 @@ export default function EntryHistory({
     let rows = 0;
     for (const g of groups) {
       rows += g.rowCount;
+      const ls = lineStatusMap.get(g.batch);
+      const isComplete = ls ? ls.isComplete : progressFor(progressMap, g.batch)?.status === "complete";
+      if (!isComplete) open += 1;
       const p = progressFor(progressMap, g.batch);
-      if (p && p.status !== "complete") open += 1;
       if (p?.stalled) stalled += 1;
     }
     return { batches: groups.length, rows, open, stalled };
-  }, [groups, progressMap]);
+  }, [groups, progressMap, lineStatusMap]);
 
   const searching = search.trim().length > 0;
 
@@ -315,18 +561,124 @@ export default function EntryHistory({
         </div>
       </header>
 
-      {/* Dropdown filters + counts share one band */}
+        {/* Dropdown filters + counts share one band */}
       <div
         style={{
           display: "flex",
           flexWrap: "wrap",
           alignItems: "center",
-          gap: "8px 12px",
+          gap: "8px 10px",
           padding: "10px var(--pad-card)",
           borderBottom: "1px solid var(--border)",
           background: "var(--surface-2, var(--bg))",
         }}
       >
+        {/* All Batches Button */}
+        <button
+          type="button"
+          onClick={() => setLedgerFilter("all")}
+          style={{
+            fontSize: 11.5,
+            fontWeight: 700,
+            padding: "4px 10px",
+            borderRadius: "var(--radius-pill)",
+            background: ledgerFilter === "all" ? "var(--surface-3)" : "var(--surface)",
+            color: ledgerFilter === "all" ? "var(--text)" : "var(--text-3)",
+            border: `1px solid ${ledgerFilter === "all" ? "var(--border-strong)" : "var(--border)"}`,
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            transition: "all var(--duration-fast) var(--ease-out)",
+          }}
+          title="Show all batches"
+        >
+          All ({totalBatchCount})
+        </button>
+
+        {/* On Ledger Filter Pill */}
+        <button
+          type="button"
+          onClick={() => setLedgerFilter(ledgerFilter === "synced" ? "all" : "synced")}
+          style={{
+            fontSize: 11.5,
+            fontWeight: 700,
+            padding: "4px 10px",
+            borderRadius: "var(--radius-pill)",
+            background: ledgerFilter === "synced" ? "var(--positive)" : "var(--positive-weak)",
+            color: ledgerFilter === "synced" ? "#ffffff" : "var(--positive)",
+            border: ledgerFilter === "synced"
+              ? "1px solid var(--positive)"
+              : "1px solid color-mix(in srgb, var(--positive) 30%, transparent)",
+            boxShadow: ledgerFilter === "synced"
+              ? "0 0 0 2px color-mix(in srgb, var(--positive) 25%, transparent)"
+              : "none",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            transition: "all var(--duration-fast) var(--ease-out)",
+          }}
+          title="Filter batches confirmed on ledger"
+        >
+          <span style={{ fontSize: 9 }}>●</span>
+          <span>{onLedgerCount} on ledger</span>
+        </button>
+
+        {/* Not on Ledger Filter Pill */}
+        <button
+          type="button"
+          onClick={() => setLedgerFilter(ledgerFilter === "pending" ? "all" : "pending")}
+          style={{
+            fontSize: 11.5,
+            fontWeight: 700,
+            padding: "4px 10px",
+            borderRadius: "var(--radius-pill)",
+            background: ledgerFilter === "pending" ? "var(--status-warn, #d97706)" : "var(--warning-weak)",
+            color: ledgerFilter === "pending" ? "#ffffff" : "var(--status-warn, #d97706)",
+            border: ledgerFilter === "pending"
+              ? "1px solid var(--status-warn, #d97706)"
+              : "1px solid color-mix(in srgb, var(--status-warn, #d97706) 30%, transparent)",
+            boxShadow: ledgerFilter === "pending"
+              ? "0 0 0 2px color-mix(in srgb, var(--status-warn, #d97706) 25%, transparent)"
+              : "none",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            transition: "all var(--duration-fast) var(--ease-out)",
+          }}
+          title="Filter batches not yet on ledger (pending sync)"
+        >
+          <span style={{ fontSize: 9 }}>●</span>
+          <span>{notOnLedgerCount} not on ledger</span>
+        </button>
+
+        {/* Group by Status Toggle */}
+        {totalBatchCount > 0 && ledgerFilter === "all" && (
+          <button
+            type="button"
+            onClick={() => setGroupByLedger(!groupByLedger)}
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              padding: "4px 9px",
+              borderRadius: "var(--radius-pill)",
+              background: groupByLedger ? "var(--surface-3)" : "transparent",
+              color: groupByLedger ? "var(--text)" : "var(--text-3)",
+              border: `1px solid ${groupByLedger ? "var(--border-strong)" : "var(--border)"}`,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+            title="Group into On Ledger and Not on Ledger sections"
+          >
+            <span style={{ fontSize: 10 }}>☷</span>
+            <span>{groupByLedger ? "Grouped" : "Group by Status"}</span>
+          </button>
+        )}
+
         <Select
           value={scope}
           onChange={(v) => setScope(v as SourceScope)}
@@ -445,49 +797,173 @@ export default function EntryHistory({
             <span />
             <span>Batch</span>
             <span>Dates</span>
-            <span>Gates</span>
+            <span>Process Track</span>
             <span style={{ textAlign: "right" }}>Checked</span>
             <span style={{ textAlign: "right" }}>Accepted</span>
             <span style={{ textAlign: "right" }}>Rejected</span>
           </div>
-          {periods.map((p) => (
-            <div key={p.period}>
-              {/* One header per period. The list is lot-first, so this only
-                  files the lots — it never splits a lot's stages apart. */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  gap: 10,
-                  padding: "10px var(--pad-card) 6px",
-                  borderBottom: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  position: "sticky",
-                  top: 0,
-                  zIndex: 1,
-                }}
-              >
-                <span style={{ fontSize: "var(--text-sm)", fontWeight: 700 }}>{p.label}</span>
-                <span className="small" style={{ color: "var(--text-3)" }}>
-                  {p.batchCount} {p.batchCount === 1 ? "lot" : "lots"} · {p.rowCount}{" "}
-                  {p.rowCount === 1 ? "entry" : "entries"}
-                </span>
+
+          {groupedSections ? (
+            <>
+              {/* On Ledger Partition */}
+              {groupedSections.onLedger.count > 0 && (
+                <div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "8px var(--pad-card)",
+                      background: "color-mix(in srgb, var(--positive) 8%, var(--surface))",
+                      borderBottom: "1px solid color-mix(in srgb, var(--positive) 25%, var(--border))",
+                      borderTop: "1px solid color-mix(in srgb, var(--positive) 25%, var(--border))",
+                    }}
+                  >
+                    <span style={{ color: "var(--positive)", fontSize: 10 }}>●</span>
+                    <span style={{ fontSize: "var(--text-xs)", fontWeight: 700, color: "var(--positive)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      On Ledger — Confirmed ({groupedSections.onLedger.count})
+                    </span>
+                  </div>
+                  {groupedSections.onLedger.periods.map((p) => (
+                    <div key={`on-ledger-${p.period}`}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "baseline",
+                          gap: 10,
+                          padding: "10px var(--pad-card) 6px",
+                          borderBottom: "1px solid var(--border)",
+                          background: "var(--surface)",
+                          position: "sticky",
+                          top: 0,
+                          zIndex: 1,
+                        }}
+                      >
+                        <span style={{ fontSize: "var(--text-sm)", fontWeight: 700 }}>{p.label}</span>
+                        <span className="small" style={{ color: "var(--text-3)" }}>
+                          {p.batchCount} {p.batchCount === 1 ? "lot" : "lots"} · {p.rowCount}{" "}
+                          {p.rowCount === 1 ? "entry" : "entries"}
+                        </span>
+                      </div>
+                      {p.groups.map((g) => (
+                        <HistoryBatch
+                          key={g.batch}
+                          group={g}
+                          open={openBatch === g.batch}
+                          onToggle={() => setOpenBatch((b) => (b === g.batch ? null : g.batch))}
+                          progress={progressFor(progressMap, g.batch)}
+                          lineStatus={lineStatusMap.get(g.batch) ?? null}
+                          onEdit={onEdit}
+                          onReuse={onReuse}
+                          onHistory={setHistoryRow}
+                          canErase={canEraseLedger}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Not on Ledger Partition */}
+              {groupedSections.notOnLedger.count > 0 && (
+                <div style={{ marginTop: groupedSections.onLedger.count > 0 ? 8 : 0 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "8px var(--pad-card)",
+                      background: "color-mix(in srgb, var(--status-warn, #d97706) 8%, var(--surface))",
+                      borderBottom: "1px solid color-mix(in srgb, var(--status-warn, #d97706) 25%, var(--border))",
+                      borderTop: "1px solid color-mix(in srgb, var(--status-warn, #d97706) 25%, var(--border))",
+                    }}
+                  >
+                    <span style={{ color: "var(--status-warn, #d97706)", fontSize: 10 }}>●</span>
+                    <span style={{ fontSize: "var(--text-xs)", fontWeight: 700, color: "var(--status-warn, #d97706)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      Not on Ledger — Pending Sync ({groupedSections.notOnLedger.count})
+                    </span>
+                  </div>
+                  {groupedSections.notOnLedger.periods.map((p) => (
+                    <div key={`not-on-ledger-${p.period}`}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "baseline",
+                          gap: 10,
+                          padding: "10px var(--pad-card) 6px",
+                          borderBottom: "1px solid var(--border)",
+                          background: "var(--surface)",
+                          position: "sticky",
+                          top: 0,
+                          zIndex: 1,
+                        }}
+                      >
+                        <span style={{ fontSize: "var(--text-sm)", fontWeight: 700 }}>{p.label}</span>
+                        <span className="small" style={{ color: "var(--text-3)" }}>
+                          {p.batchCount} {p.batchCount === 1 ? "lot" : "lots"} · {p.rowCount}{" "}
+                          {p.rowCount === 1 ? "entry" : "entries"}
+                        </span>
+                      </div>
+                      {p.groups.map((g) => (
+                        <HistoryBatch
+                          key={g.batch}
+                          group={g}
+                          open={openBatch === g.batch}
+                          onToggle={() => setOpenBatch((b) => (b === g.batch ? null : g.batch))}
+                          progress={progressFor(progressMap, g.batch)}
+                          lineStatus={lineStatusMap.get(g.batch) ?? null}
+                          onEdit={onEdit}
+                          onReuse={onReuse}
+                          onHistory={setHistoryRow}
+                          canErase={canEraseLedger}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            periods.map((p) => (
+              <div key={p.period}>
+                {/* One header per period. The list is lot-first, so this only
+                    files the lots — it never splits a lot's stages apart. */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: 10,
+                    padding: "10px var(--pad-card) 6px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "var(--surface)",
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 1,
+                  }}
+                >
+                  <span style={{ fontSize: "var(--text-sm)", fontWeight: 700 }}>{p.label}</span>
+                  <span className="small" style={{ color: "var(--text-3)" }}>
+                    {p.batchCount} {p.batchCount === 1 ? "lot" : "lots"} · {p.rowCount}{" "}
+                    {p.rowCount === 1 ? "entry" : "entries"}
+                  </span>
+                </div>
+                {p.groups.map((g) => (
+                  <HistoryBatch
+                    key={g.batch}
+                    group={g}
+                    open={openBatch === g.batch}
+                    onToggle={() => setOpenBatch((b) => (b === g.batch ? null : g.batch))}
+                    progress={progressFor(progressMap, g.batch)}
+                    lineStatus={lineStatusMap.get(g.batch) ?? null}
+                    onEdit={onEdit}
+                    onReuse={onReuse}
+                    onHistory={setHistoryRow}
+                    canErase={canEraseLedger}
+                  />
+                ))}
               </div>
-              {p.groups.map((g) => (
-                <HistoryBatch
-                  key={g.batch}
-                  group={g}
-                  open={openBatch === g.batch}
-                  onToggle={() => setOpenBatch((b) => (b === g.batch ? null : g.batch))}
-                  progress={progressFor(progressMap, g.batch)}
-                  onEdit={onEdit}
-                  onReuse={onReuse}
-                  onHistory={setHistoryRow}
-                  canErase={canEraseLedger}
-                />
-              ))}
-            </div>
-          ))}
+            ))
+          )}
         </div>
       )}
 
@@ -505,6 +981,7 @@ function HistoryBatch({
   open,
   onToggle,
   progress,
+  lineStatus,
   onEdit,
   onReuse,
   onHistory,
@@ -514,6 +991,7 @@ function HistoryBatch({
   open: boolean;
   onToggle: () => void;
   progress: ReturnType<typeof progressFor>;
+  lineStatus?: LineStatus | null;
   onEdit?: (row: AuditEntryRow) => void;
   onReuse?: (row: AuditEntryRow) => void;
   onHistory?: (row: AuditEntryRow) => void;
@@ -584,9 +1062,7 @@ function HistoryBatch({
         </span>
 
         <span style={{ minWidth: 0 }}>
-          {progress && progress.doneCount > 0 && (
-            <LotProgress progress={progress} showLabels={false} />
-          )}
+          <BatchProcessTrack lineStatus={lineStatus} progress={progress} />
         </span>
 
         <Cell value={g.checkedQty} />
@@ -596,6 +1072,71 @@ function HistoryBatch({
 
       {open && (
         <div className="audit-reveal" style={{ padding: "0 var(--pad-card) 16px 46px", display: "grid", gap: 14 }}>
+          {lineStatus && lineStatus.lanes.length > 0 && (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: `repeat(${Math.min(lineStatus.lanes.length, 3)}, minmax(0, 1fr))`,
+                gap: 10,
+                padding: "12px",
+                borderRadius: "var(--radius-md, 8px)",
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+              }}
+            >
+              {lineStatus.lanes.map((lane) => {
+                const isPrimary = lane.id === "primary";
+                const isDone = lane.complete;
+                const isStarted = lane.started && !lane.complete;
+                const toneColor = isDone
+                  ? "var(--positive)"
+                  : isStarted
+                    ? "var(--status-warn, #d97706)"
+                    : "var(--text-3)";
+                const capText = isDone
+                  ? "COMPLETED"
+                  : isStarted
+                    ? `${lane.done}/${lane.total} COMPLETE`
+                    : "NOT STARTED";
+                const subText = isPrimary
+                  ? "Production Dipping"
+                  : lane.id === "secondary"
+                    ? `${lane.done}/${lane.total} Secondary Stages`
+                    : `${lane.done}/${lane.total} Assembly Gates`;
+
+                return (
+                  <div
+                    key={lane.id}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-sm, 6px)",
+                      background: "var(--surface)",
+                      border: `1px solid ${
+                        isDone
+                          ? "color-mix(in srgb, var(--positive) 35%, transparent)"
+                          : isStarted
+                            ? "color-mix(in srgb, var(--status-warn, #d97706) 35%, transparent)"
+                            : "var(--border)"
+                      }`,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                    }}
+                  >
+                    <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", color: toneColor }}>
+                      {capText}
+                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                      {lane.label}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-3)" }}>
+                      {subText}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {g.stages.map((st, i) => (
             <div
               key={st.stageId}

@@ -24,6 +24,7 @@ describe("matchMetric", () => {
     ["fpy trend", "fpy"],
     ["yield last quarter", "fpy"],
     ["rejection rate", "rate"],
+    ["hold quantity", "hold"],
     ["nothing here", null],
   ])("maps %s -> %s", (text, expected) => {
     expect(matchMetric(text)).toBe(expected);
@@ -38,6 +39,7 @@ describe("screenForMetric", () => {
     expect(screenForMetric("size")).toBe("size");
     expect(screenForMetric("stage")).toBe("stage");
     expect(screenForMetric("rate")).toBe("stage");
+    expect(screenForMetric("hold")).toBe("hold");
   });
 });
 
